@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+service Logging {
+    rpc StoreMessage (LogRequest) returns (LogResponse);
+    rpc GetMessages (Empty) returns (LogResponse);
+}
+
+message LogRequest {
+    string id = 1;
+    string msg = 2;
+}
+
+message LogResponse {
+    bool success = 1;
+    string messages = 2;
+}
+
+message Empty {}

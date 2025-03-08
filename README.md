@@ -1,6 +1,6 @@
-# apz_lab1
+# apz_lab3
 
-Lab 1 for Software Architecture Course in UCU<br>
+Lab 3 for Software Architecture Course in UCU<br>
 Dependencies:<br>
 ```
 pip install fastapi grpcio grpcio-tools uvicorn requests

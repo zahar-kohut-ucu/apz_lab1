@@ -14,8 +14,6 @@ app = FastAPI()
 class Msg(BaseModel):
     msg: str
 
-MESSAGES_SERVICE_URLS = ["http://localhost:8002/message", "http://localhost:8003/message"]
-
 try:
     hz_client = hz.HazelcastClient()
     instances_map = hz_client.get_map("instances").blocking()

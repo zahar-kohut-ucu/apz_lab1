@@ -5,10 +5,21 @@ import socket
 import threading
 import time
 import os
+import consul
+import uvicorn
 
 app = FastAPI()
 
 stored_messages = []
+
+def get_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+PORT = get_free_port()
 
 def consume_messages(queue):
     while True:
@@ -20,29 +31,33 @@ def consume_messages(queue):
             print("Error consuming message:", e)
             time.sleep(1)
 
-def register_instance(hz_client, port):
-    instances_map = hz_client.get_map("messages_instances").blocking()
-    instance_id = f"{socket.gethostname()}-{port}"
-    instances_map.put(instance_id, port)
-    print(f"Registered messages-service instance {instance_id} on port {port}")
-    return instance_id
-
-def remove_instance(hz_client, instance_id):
-    instances_map = hz_client.get_map("messages_instances").blocking()
-    instances_map.remove(instance_id)
-    print(f"Removed instance {instance_id}")
-
 @app.on_event("startup")
 def startup_event():
     global hz_client, message_queue, instance_id
+    
+    consul_client = consul.Consul()
+
     hz_client = hazelcast.HazelcastClient()
-    port = int(os.environ.get("PORT", "8002"))
-    instance_id = register_instance(hz_client, port)
-    message_queue = hz_client.get_queue("message_queue").blocking()
+    service_address = socket.gethostbyname(socket.gethostname())
+    instance_id = f"{socket.gethostname()}-{PORT}"
+
+    consul_client.agent.service.register(
+        name="messages-service",
+        service_id=instance_id,
+        address=service_address,
+        port=PORT
+    )
+
+    print(f"Registered messages-service in Consul with id {instance_id} at {service_address}:{PORT}")
+
+    index, data = consul_client.kv.get("mq/queue")
+    queue_name = data['Value'].decode() if data and data['Value'] else "message_queue"
+    message_queue = hz_client.get_queue(queue_name).blocking()
 
     def shutdown():
         print("Removing instance...")
-        remove_instance(hz_client, instance_id)
+        consul_client.agent.service.deregister(instance_id)
+        print(f"Deregistered messages-service with id {instance_id}")    
     atexit.register(shutdown)
     
     consumer_thread = threading.Thread(target=consume_messages, args=(message_queue,), daemon=True)
@@ -53,3 +68,6 @@ def startup_event():
 @app.get("/message")
 def get_message():
     return {"messages": stored_messages}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

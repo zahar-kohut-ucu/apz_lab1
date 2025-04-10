@@ -6,13 +6,14 @@ import grpc
 import hazelcast
 import proto.logging_pb2 as logging_pb2
 import proto.logging_pb2_grpc as logging_pb2_grpc
+import consul
 
 BASE_PORT = 50051  
 
 class LoggingService(logging_pb2_grpc.LoggingServicer):
-    def __init__(self, hazelcast_client):
+    def __init__(self, hazelcast_client, messages_map_name):
         self.hz_client = hazelcast_client
-        self.messages_map = self.hz_client.get_map("messages").blocking()
+        self.messages_map = self.hz_client.get_map(messages_map_name).blocking()
 
     def StoreMessage(self, request, context):
         if self.messages_map.contains_key(request.id):
@@ -31,44 +32,47 @@ class LoggingService(logging_pb2_grpc.LoggingServicer):
 def start_hazelcast():
     return subprocess.Popen(["../hazelcast-5.5.0/bin/hz-start"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def get_available_port(hz_client):
-    instances_map = hz_client.get_map("instances").blocking()
-    
-    used_ports = set(instances_map.values())
-    for port in range(BASE_PORT, BASE_PORT + 10):  
-        if port not in used_ports:
-            return port
-    raise RuntimeError("No available ports for new logging instance!")
-
-def register_instance(hz_client, port):
-    instances_map = hz_client.get_map("instances").blocking()
-    instance_id = f"{socket.gethostname()}-{port}"
-    instances_map.put(instance_id, port)
-    print(f"Registered instance {instance_id} on port {port}")
-    return instance_id
-
-def remove_instance(hz_client, instance_id):
-    instances_map = hz_client.get_map("instances").blocking()
-    instances_map.remove(instance_id)
-    print(f"Removed instance {instance_id}")
+def get_available_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 def serve():
     hz_process = start_hazelcast()  
     hz_client = hazelcast.HazelcastClient()
 
-    grpc_port = get_available_port(hz_client) 
-    instance_id = register_instance(hz_client, grpc_port)
-    
+    grpc_port = get_available_port() 
+    instance_id = f"{socket.gethostname()}-{grpc_port}"
+
+    consul_client = consul.Consul()
+    service_address = socket.gethostbyname(socket.gethostname())
+    consul_client.agent.service.register(
+        name="logging-service",
+        service_id=instance_id,
+        address=service_address,
+        port=grpc_port
+    )
+    print(f"Registered logging-service in Consul with id {instance_id} at {service_address}:{grpc_port}")
+
+    index, data = consul_client.kv.get("messages/dict")
+    if data and data['Value']:
+        messages_map_name = data['Value'].decode()
+    else:
+        messages_map_name = "messages"
+
     def shutdown():
         print("Shutting down Hazelcast...")
-        remove_instance(hz_client, instance_id)  
+        consul_client.agent.service.deregister(instance_id)
+        print(f"Deregistered logging-service with id {instance_id}")
         hz_process.terminate()
         hz_process.wait()
 
     atexit.register(shutdown)
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    logging_pb2_grpc.add_LoggingServicer_to_server(LoggingService(hz_client), server)
+    logging_pb2_grpc.add_LoggingServicer_to_server(LoggingService(hz_client, messages_map_name), server)
     server.add_insecure_port(f"[::]:{grpc_port}")
     server.start()
     print(f"Logging service started on port {grpc_port}")
